@@ -1,4 +1,5 @@
 streamlit
+Plaintext
 opencv-python-headless
 mediapipe
 plotly
