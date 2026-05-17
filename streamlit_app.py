@@ -34,18 +34,12 @@ MP_AVAILABLE = False
 MP_IMPORT_ERROR = ""
 try:
     import mediapipe as mp
-    from mediapipe.tasks import python as mp_python
     from mediapipe.tasks.python.vision import (
         PoseLandmarker,
         PoseLandmarkerOptions,
         RunningMode,
     )
-    try:
-        from mediapipe.framework.formats import landmark_pb2
-    except ImportError:
-        from mediapipe import python as _mp_py  # noqa
-        import mediapipe.python._framework_bindings as _fb
-        landmark_pb2 = _fb.landmark_pb2
+    from mediapipe.tasks.python.core.base_options import BaseOptions
     MP_AVAILABLE = True
 except Exception as _e:
     MP_IMPORT_ERROR = str(_e)
@@ -79,6 +73,37 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── MediaPipe Initialization ─────────────────────────────────────────────────
+# Pose landmark indices (same order as MediaPipe Pose)
+class _PL:
+    NOSE=0; LEFT_EYE_INNER=1; LEFT_EYE=2; LEFT_EYE_OUTER=3
+    RIGHT_EYE_INNER=4; RIGHT_EYE=5; RIGHT_EYE_OUTER=6
+    LEFT_EAR=7; RIGHT_EAR=8; MOUTH_LEFT=9; MOUTH_RIGHT=10
+    LEFT_SHOULDER=11; RIGHT_SHOULDER=12
+    LEFT_ELBOW=13; RIGHT_ELBOW=14
+    LEFT_WRIST=15; RIGHT_WRIST=16
+    LEFT_PINKY=17; RIGHT_PINKY=18
+    LEFT_INDEX=19; RIGHT_INDEX=20
+    LEFT_THUMB=21; RIGHT_THUMB=22
+    LEFT_HIP=23; RIGHT_HIP=24
+    LEFT_KNEE=25; RIGHT_KNEE=26
+    LEFT_ANKLE=27; RIGHT_ANKLE=28
+    LEFT_HEEL=29; RIGHT_HEEL=30
+    LEFT_FOOT_INDEX=31; RIGHT_FOOT_INDEX=32
+
+POSE_CONNECTIONS = [
+    (0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),
+    (9,10),(11,12),(11,13),(13,15),(15,17),(15,19),(15,21),(17,19),
+    (12,14),(14,16),(16,18),(16,20),(16,22),(18,20),
+    (11,23),(12,24),(23,24),(23,25),(24,26),(25,27),(26,28),
+    (27,29),(28,30),(29,31),(30,32),(27,31),(28,32),
+]
+
+class _FakeMpPose:
+    PoseLandmark = _PL
+    POSE_CONNECTIONS = POSE_CONNECTIONS
+
+mp_pose = _FakeMpPose()
+
 _POSE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
     "pose_landmarker_full/float16/latest/pose_landmarker_full.task"
@@ -92,7 +117,7 @@ if MP_AVAILABLE:
         urllib.request.urlretrieve(_POSE_MODEL_URL, _model_path)
 
     _options = PoseLandmarkerOptions(
-        base_options=mp_python.BaseOptions(model_asset_path=_model_path),
+        base_options=BaseOptions(model_asset_path=_model_path),
         running_mode=RunningMode.IMAGE,
         num_poses=1,
         min_pose_detection_confidence=0.5,
@@ -100,33 +125,6 @@ if MP_AVAILABLE:
         min_tracking_confidence=0.5,
     )
     pose_model = PoseLandmarker.create_from_options(_options)
-
-    import mediapipe.python.solutions.pose as _mp_pose_compat
-    POSE_CONNECTIONS = _mp_pose_compat.POSE_CONNECTIONS
-
-    class _PL:
-        NOSE = 0
-        LEFT_EYE_INNER = 1; LEFT_EYE = 2; LEFT_EYE_OUTER = 3
-        RIGHT_EYE_INNER = 4; RIGHT_EYE = 5; RIGHT_EYE_OUTER = 6
-        LEFT_EAR = 7; RIGHT_EAR = 8
-        MOUTH_LEFT = 9; MOUTH_RIGHT = 10
-        LEFT_SHOULDER = 11; RIGHT_SHOULDER = 12
-        LEFT_ELBOW = 13; RIGHT_ELBOW = 14
-        LEFT_WRIST = 15; RIGHT_WRIST = 16
-        LEFT_PINKY = 17; RIGHT_PINKY = 18
-        LEFT_INDEX = 19; RIGHT_INDEX = 20
-        LEFT_THUMB = 21; RIGHT_THUMB = 22
-        LEFT_HIP = 23; RIGHT_HIP = 24
-        LEFT_KNEE = 25; RIGHT_KNEE = 26
-        LEFT_ANKLE = 27; RIGHT_ANKLE = 28
-        LEFT_HEEL = 29; RIGHT_HEEL = 30
-        LEFT_FOOT_INDEX = 31; RIGHT_FOOT_INDEX = 32
-
-    class _FakeMpPose:
-        PoseLandmark = _PL
-        POSE_CONNECTIONS = POSE_CONNECTIONS
-
-    mp_pose = _FakeMpPose()
 
 # ─── GEOMETRY HELPERS ─────────────────────────────────────────────────────────
 
@@ -431,10 +429,7 @@ st.caption(
 )
 
 if not MP_AVAILABLE:
-    st.error(
-        f"MediaPipe failed to load: {MP_IMPORT_ERROR}\n\n"
-        "Ensure mediapipe==0.10.35 is in requirements.txt and redeploy."
-    )
+    st.error(f"MediaPipe failed to load: {MP_IMPORT_ERROR}")
     st.stop()
 
 # ─── LAYOUT ───────────────────────────────────────────────────────────────────
@@ -542,8 +537,8 @@ if video_source is not None and run_analysis:
         frame = cv2.resize(frame, (640, 480))
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-        detection_result = pose_model.detect(mp_image)
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        detection_result = pose_model.detect(mp_img)
 
         # Defaults
         angles   = {}
@@ -554,21 +549,18 @@ if video_source is not None and run_analysis:
 
         if detection_result.pose_landmarks:
             lms = detection_result.pose_landmarks[0]  # first pose
+            h, w = rgb.shape[:2]
 
-            # Draw 2-D skeleton overlay
+            # Draw 2-D skeleton using cv2 directly (mp.solutions removed in 0.10.30+)
             if show_skeleton_2d:
-                from mediapipe.python.solutions import drawing_utils as _du
-                from mediapipe.python.solutions import drawing_styles as _ds
-                import mediapipe.python.solutions.pose as _pose_sol
-                proto_list = landmark_pb2.NormalizedLandmarkList()
+                for s, e in POSE_CONNECTIONS:
+                    if s < len(lms) and e < len(lms):
+                        x1,y1 = int(lms[s].x*w), int(lms[s].y*h)
+                        x2,y2 = int(lms[e].x*w), int(lms[e].y*h)
+                        cv2.line(rgb, (x1,y1), (x2,y2), (0,200,100), 2)
                 for lm in lms:
-                    lm_proto = proto_list.landmark.add()
-                    lm_proto.x = lm.x; lm_proto.y = lm.y; lm_proto.z = lm.z
-                _du.draw_landmarks(
-                    rgb, proto_list,
-                    _pose_sol.POSE_CONNECTIONS,
-                    _ds.get_default_pose_landmarks_style(),
-                )
+                    cx, cy = int(lm.x*w), int(lm.y*h)
+                    cv2.circle(rgb, (cx,cy), 4, (255,100,0), -1)
 
             angles = extract_joint_angles(lms)
             rula_d = compute_full_rula(angles)
