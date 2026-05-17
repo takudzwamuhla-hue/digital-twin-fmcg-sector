@@ -32,8 +32,12 @@ import streamlit as st
 
 try:
     import mediapipe as mp
+    from mediapipe.tasks import python as mp_python
+    from mediapipe.tasks.python import vision as mp_vision
+    from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions, RunningMode
+    from mediapipe.framework.formats import landmark_pb2
     MP_AVAILABLE = True
-except ImportError:
+except Exception:
     MP_AVAILABLE = False
 
 # ─── Page Configuration ───────────────────────────────────────────────────────
@@ -65,16 +69,57 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── MediaPipe Initialization ─────────────────────────────────────────────────
+_POSE_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+    "pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+)
+
 if MP_AVAILABLE:
-    mp_pose     = mp.solutions.pose
-    mp_drawing  = mp.solutions.drawing_utils
-    mp_draw_sty = mp.solutions.drawing_styles
-    pose_model  = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,
-        min_detection_confidence=0.5,
+    import urllib.request, os, tempfile
+
+    _model_path = os.path.join(tempfile.gettempdir(), "pose_landmarker_full.task")
+    if not os.path.exists(_model_path):
+        urllib.request.urlretrieve(_POSE_MODEL_URL, _model_path)
+
+    _options = PoseLandmarkerOptions(
+        base_options=mp_python.BaseOptions(model_asset_path=_model_path),
+        running_mode=RunningMode.IMAGE,
+        num_poses=1,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
+    pose_model = PoseLandmarker.create_from_options(_options)
+
+    # Keep these aliases so the rest of the code that references them still works
+    # POSE_CONNECTIONS is a frozenset of (start, end) index tuples — same as before
+    import mediapipe.python.solutions.pose as _mp_pose_compat
+    POSE_CONNECTIONS = _mp_pose_compat.POSE_CONNECTIONS
+
+    # PoseLandmark enum for joint indices
+    class _PL:
+        NOSE = 0
+        LEFT_EYE_INNER = 1; LEFT_EYE = 2; LEFT_EYE_OUTER = 3
+        RIGHT_EYE_INNER = 4; RIGHT_EYE = 5; RIGHT_EYE_OUTER = 6
+        LEFT_EAR = 7; RIGHT_EAR = 8
+        MOUTH_LEFT = 9; MOUTH_RIGHT = 10
+        LEFT_SHOULDER = 11; RIGHT_SHOULDER = 12
+        LEFT_ELBOW = 13; RIGHT_ELBOW = 14
+        LEFT_WRIST = 15; RIGHT_WRIST = 16
+        LEFT_PINKY = 17; RIGHT_PINKY = 18
+        LEFT_INDEX = 19; RIGHT_INDEX = 20
+        LEFT_THUMB = 21; RIGHT_THUMB = 22
+        LEFT_HIP = 23; RIGHT_HIP = 24
+        LEFT_KNEE = 25; RIGHT_KNEE = 26
+        LEFT_ANKLE = 27; RIGHT_ANKLE = 28
+        LEFT_HEEL = 29; RIGHT_HEEL = 30
+        LEFT_FOOT_INDEX = 31; RIGHT_FOOT_INDEX = 32
+
+    class _FakeMpPose:
+        PoseLandmark = _PL
+        POSE_CONNECTIONS = POSE_CONNECTIONS
+
+    mp_pose = _FakeMpPose()
 
 # ─── GEOMETRY HELPERS ─────────────────────────────────────────────────────────
 
@@ -489,7 +534,10 @@ if video_source is not None and run_analysis:
         # ── Process frame ──
         frame = cv2.resize(frame, (640, 480))
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = pose_model.process(rgb)
+
+        import mediapipe as _mp
+        mp_image = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb)
+        detection_result = pose_model.detect(mp_image)
 
         # Defaults
         angles   = {}
@@ -498,16 +546,23 @@ if video_source is not None and run_analysis:
         ocra_d   = {}
         xs, ys, zs = [], [], []
 
-        if results.pose_landmarks:
-            lms = results.pose_landmarks.landmark
+        if detection_result.pose_landmarks:
+            lms = detection_result.pose_landmarks[0]  # first pose
 
-            # Draw 2-D skeleton
+            # Draw 2-D skeleton overlay
             if show_skeleton_2d:
-                mp_drawing.draw_landmarks(
-                    rgb,
-                    results.pose_landmarks,
-                    mp_pose.POSE_CONNECTIONS,
-                    mp_draw_sty.get_default_pose_landmarks_style(),
+                from mediapipe.python.solutions import drawing_utils as _du
+                from mediapipe.python.solutions import drawing_styles as _ds
+                import mediapipe.python.solutions.pose as _pose_sol
+                # Convert NormalizedLandmark list → proto for drawing
+                proto_list = landmark_pb2.NormalizedLandmarkList()
+                for lm in lms:
+                    lm_proto = proto_list.landmark.add()
+                    lm_proto.x = lm.x; lm_proto.y = lm.y; lm_proto.z = lm.z
+                _du.draw_landmarks(
+                    rgb, proto_list,
+                    _pose_sol.POSE_CONNECTIONS,
+                    _ds.get_default_pose_landmarks_style(),
                 )
 
             angles = extract_joint_angles(lms)
@@ -542,7 +597,7 @@ if video_source is not None and run_analysis:
                 marker=dict(size=4, color="royalblue", opacity=0.9),
                 name="Joints",
             ))
-            for conn in mp_pose.POSE_CONNECTIONS:
+            for conn in POSE_CONNECTIONS:
                 s, e = conn[0], conn[1]
                 if s < len(xs) and e < len(xs):
                     fig3d.add_trace(go.Scatter3d(
