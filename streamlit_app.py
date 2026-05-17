@@ -30,11 +30,19 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+MP_AVAILABLE = False
+MP_IMPORT_ERROR = ""
 try:
     import mediapipe as mp
+    from mediapipe.tasks.python.vision import (
+        PoseLandmarker,
+        PoseLandmarkerOptions,
+        RunningMode,
+    )
+    from mediapipe.tasks.python.core.base_options import BaseOptions
     MP_AVAILABLE = True
-except ImportError:
-    MP_AVAILABLE = False
+except Exception as _e:
+    MP_IMPORT_ERROR = str(_e)
 
 # ─── Page Configuration ───────────────────────────────────────────────────────
 st.set_page_config(
@@ -65,16 +73,56 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ─── MediaPipe Initialization ─────────────────────────────────────────────────
+# Pose landmark indices (same as MediaPipe Pose model)
+class _PL:
+    NOSE=0; LEFT_EYE_INNER=1; LEFT_EYE=2; LEFT_EYE_OUTER=3
+    RIGHT_EYE_INNER=4; RIGHT_EYE=5; RIGHT_EYE_OUTER=6
+    LEFT_EAR=7; RIGHT_EAR=8; MOUTH_LEFT=9; MOUTH_RIGHT=10
+    LEFT_SHOULDER=11; RIGHT_SHOULDER=12
+    LEFT_ELBOW=13; RIGHT_ELBOW=14
+    LEFT_WRIST=15; RIGHT_WRIST=16
+    LEFT_PINKY=17; RIGHT_PINKY=18
+    LEFT_INDEX=19; RIGHT_INDEX=20
+    LEFT_THUMB=21; RIGHT_THUMB=22
+    LEFT_HIP=23; RIGHT_HIP=24
+    LEFT_KNEE=25; RIGHT_KNEE=26
+    LEFT_ANKLE=27; RIGHT_ANKLE=28
+    LEFT_HEEL=29; RIGHT_HEEL=30
+    LEFT_FOOT_INDEX=31; RIGHT_FOOT_INDEX=32
+
+POSE_CONNECTIONS = [
+    (0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),
+    (9,10),(11,12),(11,13),(13,15),(15,17),(15,19),(15,21),(17,19),
+    (12,14),(14,16),(16,18),(16,20),(16,22),(18,20),
+    (11,23),(12,24),(23,24),(23,25),(24,26),(25,27),(26,28),
+    (27,29),(28,30),(29,31),(30,32),(27,31),(28,32),
+]
+
+class _FakeMpPose:
+    PoseLandmark = _PL
+    POSE_CONNECTIONS = POSE_CONNECTIONS
+
+mp_pose = _FakeMpPose()
+
+_POSE_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+    "pose_landmarker_full/float16/latest/pose_landmarker_full.task"
+)
+
 if MP_AVAILABLE:
-    mp_pose     = mp.solutions.pose
-    mp_drawing  = mp.solutions.drawing_utils
-    mp_draw_sty = mp.solutions.drawing_styles
-    pose_model  = mp_pose.Pose(
-        static_image_mode=False,
-        model_complexity=1,
-        min_detection_confidence=0.5,
+    import urllib.request, os, tempfile
+    _model_path = os.path.join(tempfile.gettempdir(), "pose_landmarker_full.task")
+    if not os.path.exists(_model_path):
+        urllib.request.urlretrieve(_POSE_MODEL_URL, _model_path)
+    _options = PoseLandmarkerOptions(
+        base_options=BaseOptions(model_asset_path=_model_path),
+        running_mode=RunningMode.IMAGE,
+        num_poses=1,
+        min_pose_detection_confidence=0.5,
+        min_pose_presence_confidence=0.5,
         min_tracking_confidence=0.5,
     )
+    pose_model = PoseLandmarker.create_from_options(_options)
 
 # ─── GEOMETRY HELPERS ─────────────────────────────────────────────────────────
 
@@ -379,10 +427,7 @@ st.caption(
 )
 
 if not MP_AVAILABLE:
-    st.error(
-        "MediaPipe is not installed in this environment. "
-        "Run `pip install mediapipe` and restart the app."
-    )
+    st.error(f"MediaPipe failed to load: {MP_IMPORT_ERROR}")
     st.stop()
 
 # ─── LAYOUT ───────────────────────────────────────────────────────────────────
@@ -489,7 +534,9 @@ if video_source is not None and run_analysis:
         # ── Process frame ──
         frame = cv2.resize(frame, (640, 480))
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = pose_model.process(rgb)
+
+        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+        detection_result = pose_model.detect(mp_img)
 
         # Defaults
         angles   = {}
@@ -498,17 +545,20 @@ if video_source is not None and run_analysis:
         ocra_d   = {}
         xs, ys, zs = [], [], []
 
-        if results.pose_landmarks:
-            lms = results.pose_landmarks.landmark
+        if detection_result.pose_landmarks:
+            lms = detection_result.pose_landmarks[0]  # first pose
+            h, w = rgb.shape[:2]
 
-            # Draw 2-D skeleton
+            # Draw 2-D skeleton with cv2 (mp.solutions removed in mediapipe 0.10.30+)
             if show_skeleton_2d:
-                mp_drawing.draw_landmarks(
-                    rgb,
-                    results.pose_landmarks,
-                    mp_pose.POSE_CONNECTIONS,
-                    mp_draw_sty.get_default_pose_landmarks_style(),
-                )
+                for s, e in POSE_CONNECTIONS:
+                    if s < len(lms) and e < len(lms):
+                        x1, y1 = int(lms[s].x * w), int(lms[s].y * h)
+                        x2, y2 = int(lms[e].x * w), int(lms[e].y * h)
+                        cv2.line(rgb, (x1, y1), (x2, y2), (0, 200, 100), 2)
+                for lm in lms:
+                    cx, cy = int(lm.x * w), int(lm.y * h)
+                    cv2.circle(rgb, (cx, cy), 4, (255, 100, 0), -1)
 
             angles = extract_joint_angles(lms)
             rula_d = compute_full_rula(angles)
@@ -542,7 +592,7 @@ if video_source is not None and run_analysis:
                 marker=dict(size=4, color="royalblue", opacity=0.9),
                 name="Joints",
             ))
-            for conn in mp_pose.POSE_CONNECTIONS:
+            for conn in POSE_CONNECTIONS:
                 s, e = conn[0], conn[1]
                 if s < len(xs) and e < len(xs):
                     fig3d.add_trace(go.Scatter3d(
