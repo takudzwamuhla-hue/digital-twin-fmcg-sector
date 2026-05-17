@@ -30,15 +30,25 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+MP_AVAILABLE = False
+MP_IMPORT_ERROR = ""
 try:
     import mediapipe as mp
     from mediapipe.tasks import python as mp_python
-    from mediapipe.tasks.python import vision as mp_vision
-    from mediapipe.tasks.python.vision import PoseLandmarker, PoseLandmarkerOptions, RunningMode
-    from mediapipe.framework.formats import landmark_pb2
+    from mediapipe.tasks.python.vision import (
+        PoseLandmarker,
+        PoseLandmarkerOptions,
+        RunningMode,
+    )
+    try:
+        from mediapipe.framework.formats import landmark_pb2
+    except ImportError:
+        from mediapipe import python as _mp_py  # noqa
+        import mediapipe.python._framework_bindings as _fb
+        landmark_pb2 = _fb.landmark_pb2
     MP_AVAILABLE = True
-except Exception:
-    MP_AVAILABLE = False
+except Exception as _e:
+    MP_IMPORT_ERROR = str(_e)
 
 # ─── Page Configuration ───────────────────────────────────────────────────────
 st.set_page_config(
@@ -91,12 +101,9 @@ if MP_AVAILABLE:
     )
     pose_model = PoseLandmarker.create_from_options(_options)
 
-    # Keep these aliases so the rest of the code that references them still works
-    # POSE_CONNECTIONS is a frozenset of (start, end) index tuples — same as before
     import mediapipe.python.solutions.pose as _mp_pose_compat
     POSE_CONNECTIONS = _mp_pose_compat.POSE_CONNECTIONS
 
-    # PoseLandmark enum for joint indices
     class _PL:
         NOSE = 0
         LEFT_EYE_INNER = 1; LEFT_EYE = 2; LEFT_EYE_OUTER = 3
@@ -425,8 +432,8 @@ st.caption(
 
 if not MP_AVAILABLE:
     st.error(
-        "MediaPipe is not installed in this environment. "
-        "Run `pip install mediapipe` and restart the app."
+        f"MediaPipe failed to load: {MP_IMPORT_ERROR}\n\n"
+        "Ensure mediapipe==0.10.35 is in requirements.txt and redeploy."
     )
     st.stop()
 
@@ -535,8 +542,7 @@ if video_source is not None and run_analysis:
         frame = cv2.resize(frame, (640, 480))
         rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        import mediapipe as _mp
-        mp_image = _mp.Image(image_format=_mp.ImageFormat.SRGB, data=rgb)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         detection_result = pose_model.detect(mp_image)
 
         # Defaults
@@ -554,7 +560,6 @@ if video_source is not None and run_analysis:
                 from mediapipe.python.solutions import drawing_utils as _du
                 from mediapipe.python.solutions import drawing_styles as _ds
                 import mediapipe.python.solutions.pose as _pose_sol
-                # Convert NormalizedLandmark list → proto for drawing
                 proto_list = landmark_pb2.NormalizedLandmarkList()
                 for lm in lms:
                     lm_proto = proto_list.landmark.add()
